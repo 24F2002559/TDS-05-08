@@ -1,4 +1,4 @@
-import json, os, socket, ipaddress, sys
+import json, os, socket, ipaddress, sys, base64, re
 from urllib.parse import urljoin, urlparse, unquote
 import requests
 from flask import Flask, request, jsonify
@@ -49,13 +49,35 @@ def has_traversal(path):
     parts = path.replace('\\', '/').split('/')
     return '..' in parts
 
+def contains_private_ip(text):
+    """Check if any private/meta IP appears anywhere in the string (for URL safety)."""
+    # IPv4 private ranges
+    ipv4_pattern = r'(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})'
+    if re.search(ipv4_pattern, text):
+        return True
+    # IPv6 loopback/link-local/private prefixes
+    ipv6_pattern = r'(?:\[?(?:::1|fe80:|fc00:|fd00:|::ffff:|::))'
+    if re.search(ipv6_pattern, text, re.IGNORECASE):
+        return True
+    return False
+
 # ---------- read_file ----------
 def read_file(args):
     raw_path = args.get("path", "")
     if not isinstance(raw_path, str):
         return {"action": "block", "reason": "path must be a string.", "result": None}
 
-    fully_decoded = recursive_unquote(raw_path)
+    # Handle base64-encoded paths
+    decoded_path = raw_path
+    if raw_path.startswith("base64:"):
+        try:
+            decoded_bytes = base64.b64decode(raw_path[7:], validate=True)
+            decoded_path = decoded_bytes.decode('utf-8', errors='ignore')
+        except:
+            # Not valid base64, proceed with raw path
+            pass
+
+    fully_decoded = recursive_unquote(decoded_path)
 
     if "outside-691862e8" in fully_decoded:
         return {"action": "block", "reason": "Access to canary directory blocked.", "result": None}
@@ -76,6 +98,7 @@ def read_file(args):
     if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
+    # Now open the raw path (original, not base64 decoded) to support literal files
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
@@ -101,6 +124,10 @@ def fetch_url(args):
     url = args.get("url", "")
     if not isinstance(url, str):
         return {"action": "block", "reason": "url must be a string.", "result": None}
+
+    # Pre‑check: block if URL itself contains a private IP anywhere (including query)
+    if contains_private_ip(url):
+        return {"action": "block", "reason": "URL contains private IP address.", "result": None}
 
     try:
         parsed = urlparse(url)
@@ -132,6 +159,9 @@ def fetch_url(args):
             if not new_url:
                 return {"action": "block", "reason": "Redirect missing Location.", "result": None}
             new_url = urljoin(current_url, new_url)
+            # Check new URL for private IP in string as well
+            if contains_private_ip(new_url):
+                return {"action": "block", "reason": "Redirect URL contains private IP address.", "result": None}
             try:
                 new_parsed = urlparse(new_url)
             except:
@@ -160,7 +190,6 @@ LOG_FILE = "/app/requests.log"
 def guardrail():
     try:
         data = request.get_json(force=True, silent=True)
-        # Log to file
         with open(LOG_FILE, "a") as f:
             f.write(f"REQUEST_BODY: {json.dumps(data)}\n")
         if not data:
@@ -201,6 +230,11 @@ def debug():
         if tool == "read_file":
             raw = args.get("path", "")
             dec = recursive_unquote(raw)
+            if raw.startswith("base64:"):
+                try:
+                    dec = base64.b64decode(raw[7:]).decode('utf-8', errors='ignore')
+                except:
+                    pass
             abs_dec = os.path.join(SANDBOX_ROOT, dec) if not os.path.isabs(dec) else dec
             real_dec = canonicalize_path(abs_dec) if isinstance(raw, str) else None
             info["decoded"] = dec
