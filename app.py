@@ -11,6 +11,7 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
+    """True if host resolves ONLY to public IPs. False if any private/loopback/link-local."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
@@ -23,6 +24,13 @@ def is_public_ip(host):
         return True
     except:
         return False
+
+def get_all_ips(host):
+    """Return a set of IP strings for the given host, for logging."""
+    try:
+        return {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except:
+        return set()
 
 def canonicalize_path(path):
     if not isinstance(path, str):
@@ -132,13 +140,11 @@ def fetch_url(args):
 
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
-        # Log the IPs we are about to connect to (for debugging)
-        try:
-            ips = {info[4][0] for info in socket.getaddrinfo(urlparse(current_url).hostname, None)}
-        except:
-            ips = set()
-        if not is_public_ip(urlparse(current_url).hostname):
-            return {"action": "block", "reason": f"Host suddenly resolved to non‑public IPs: {ips}", "result": None}
+        current_host = urlparse(current_url).hostname
+        # Final pre‑request DNS check (prevents DNS rebinding)
+        if not is_public_ip(current_host):
+            ips = get_all_ips(current_host)
+            return {"action": "block", "reason": f"Host {current_host} suddenly resolves to non‑public IPs: {ips}", "result": None}
 
         try:
             resp = requests.get(current_url, timeout=5, allow_redirects=False, stream=True)
@@ -162,14 +168,16 @@ def fetch_url(args):
             if not new_host or new_host.lower() not in ALLOWED_HOSTS:
                 return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None}
             if not is_public_ip(new_host):
-                return {"action": "block", "reason": f"Redirect host resolves to non‑public IP.", "result": None}
+                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
-            # Log final IPs (for debugging)
-            try:
-                final_ips = {info[4][0] for info in socket.getaddrinfo(urlparse(current_url).hostname, None)}
-            except:
-                final_ips = set()
+            # After receiving the response, check again that the final host is still public
+            final_host = urlparse(current_url).hostname
+            if not is_public_ip(final_host):
+                final_ips = get_all_ips(final_host)
+                return {"action": "block", "reason": f"Final host {final_host} resolves to non‑public IPs: {final_ips}", "result": None}
+            # All good – allow
+            final_ips = get_all_ips(final_host)
             return {"action": "allow", "reason": f"Fetched successfully (final IPs: {final_ips}).", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
