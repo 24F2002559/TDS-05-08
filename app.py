@@ -49,18 +49,6 @@ def has_traversal(path):
     parts = path.replace('\\', '/').split('/')
     return '..' in parts
 
-def contains_private_ip(text):
-    """Check if any private/meta IP appears anywhere in the string (for URL safety)."""
-    # IPv4 private ranges
-    ipv4_pattern = r'(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})'
-    if re.search(ipv4_pattern, text):
-        return True
-    # IPv6 loopback/link-local/private prefixes
-    ipv6_pattern = r'(?:\[?(?:::1|fe80:|fc00:|fd00:|::ffff:|::))'
-    if re.search(ipv6_pattern, text, re.IGNORECASE):
-        return True
-    return False
-
 # ---------- read_file ----------
 def read_file(args):
     raw_path = args.get("path", "")
@@ -74,7 +62,6 @@ def read_file(args):
             decoded_bytes = base64.b64decode(raw_path[7:], validate=True)
             decoded_path = decoded_bytes.decode('utf-8', errors='ignore')
         except:
-            # Not valid base64, proceed with raw path
             pass
 
     fully_decoded = recursive_unquote(decoded_path)
@@ -98,7 +85,7 @@ def read_file(args):
     if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
-    # Now open the raw path (original, not base64 decoded) to support literal files
+    # Open the raw path (to support literal %2e%2e filenames)
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
@@ -125,10 +112,6 @@ def fetch_url(args):
     if not isinstance(url, str):
         return {"action": "block", "reason": "url must be a string.", "result": None}
 
-    # Pre‑check: block if URL itself contains a private IP anywhere (including query)
-    if contains_private_ip(url):
-        return {"action": "block", "reason": "URL contains private IP address.", "result": None}
-
     try:
         parsed = urlparse(url)
     except:
@@ -141,7 +124,7 @@ def fetch_url(args):
 
     hostname = parsed.hostname
     if not hostname:
-        return {"action": "block", "reason": "No hostname in URL.", "result": None}
+        return {"action": "block", "reason": "No hostname in URL.", "result": None)
     if hostname.lower() not in ALLOWED_HOSTS:
         return {"action": "block", "reason": f"Host {hostname} not allowed.", "result": None}
     if not is_public_ip(hostname):
@@ -159,9 +142,6 @@ def fetch_url(args):
             if not new_url:
                 return {"action": "block", "reason": "Redirect missing Location.", "result": None}
             new_url = urljoin(current_url, new_url)
-            # Check new URL for private IP in string as well
-            if contains_private_ip(new_url):
-                return {"action": "block", "reason": "Redirect URL contains private IP address.", "result": None}
             try:
                 new_parsed = urlparse(new_url)
             except:
@@ -183,7 +163,7 @@ def fetch_url(args):
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
 
-# ---------- Main endpoint (logs to file) ----------
+# ---------- Main endpoint ----------
 LOG_FILE = "/app/requests.log"
 
 @app.route("/", methods=["POST"])
