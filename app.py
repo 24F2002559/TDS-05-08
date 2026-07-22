@@ -124,7 +124,7 @@ def fetch_url(args):
 
     hostname = parsed.hostname
     if not hostname:
-        return {"action": "block", "reason": "No hostname in URL.", "result": None)
+        return {"action": "block", "reason": "No hostname in URL.", "result": None}   # ← fixed line
     if hostname.lower() not in ALLOWED_HOSTS:
         return {"action": "block", "reason": f"Host {hostname} not allowed.", "result": None}
     if not is_public_ip(hostname):
