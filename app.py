@@ -124,7 +124,7 @@ def fetch_url(args):
 
     hostname = parsed.hostname
     if not hostname:
-        return {"action": "block", "reason": "No hostname in URL.", "result": None}   # ← fixed line
+        return {"action": "block", "reason": "No hostname in URL.", "result": None}
     if hostname.lower() not in ALLOWED_HOSTS:
         return {"action": "block", "reason": f"Host {hostname} not allowed.", "result": None}
     if not is_public_ip(hostname):
@@ -132,6 +132,10 @@ def fetch_url(args):
 
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
+        # ** Second DNS check right before the request (prevents TOCTOU / DNS rebinding) **
+        if not is_public_ip(urlparse(current_url).hostname):
+            return {"action": "block", "reason": "Host suddenly resolved to a non‑public IP.", "result": None}
+
         try:
             resp = requests.get(current_url, timeout=5, allow_redirects=False, stream=True)
         except Exception as e:
@@ -157,8 +161,9 @@ def fetch_url(args):
                 return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
+            # Final check after response (belt and suspenders)
             if not is_public_ip(urlparse(current_url).hostname):
-                return {"action": "block", "reason": "Final host resolves to non‑public IP.", "result": None}
+                return {"action": "block", "reason": "Final host resolved to a non‑public IP.", "result": None}
             return {"action": "allow", "reason": "Fetched successfully.", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
