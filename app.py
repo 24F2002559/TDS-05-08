@@ -1,5 +1,5 @@
 import json, os, socket, ipaddress
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
 import requests
 from flask import Flask, request, jsonify
 
@@ -31,20 +31,34 @@ def canonicalize_path(path):
 
 def read_file(args):
     path = args.get("path", "")
-    # If path is not absolute, make it relative to the sandbox root
-    if not os.path.isabs(path):
-        path = os.path.join(SANDBOX_ROOT, path)
-    # Canonicalize (resolves '..', symlinks, etc.)
-    real = canonicalize_path(path)
-    if real == SANDBOX_ROOT or real.startswith(SANDBOX_ROOT + os.sep):
-        try:
-            with open(real, 'r') as f:
-                content = f.read()
-            return {"action": "allow", "reason": "File inside sandbox.", "result": content}
-        except Exception as e:
-            return {"action": "allow", "reason": "File inside sandbox, but error reading.", "result": f"Error: {e}"}
+    # Decode percent-encoded characters to catch evasion like %2e%2e -> ..
+    decoded_path = unquote(path)
+    # Make decoded path absolute relative to sandbox root
+    if not os.path.isabs(decoded_path):
+        decoded_abs = os.path.join(SANDBOX_ROOT, decoded_path)
     else:
-        return {"action": "block", "reason": f"Path resolves outside sandbox: {real}", "result": None}
+        decoded_abs = decoded_path
+    real_decoded = canonicalize_path(decoded_abs)
+    if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
+        return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
+
+    # The decoded path is safe; now process the original raw path for actual file access
+    raw_path = path
+    if not os.path.isabs(raw_path):
+        raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
+    else:
+        raw_abs = raw_path
+    real_raw = canonicalize_path(raw_abs)
+    # Extra safety: raw path must also be inside sandbox (should always be true here)
+    if not (real_raw == SANDBOX_ROOT or real_raw.startswith(SANDBOX_ROOT + os.sep)):
+        return {"action": "block", "reason": f"Raw path escapes sandbox: {real_raw}", "result": None}
+
+    try:
+        with open(real_raw, 'r') as f:
+            content = f.read()
+        return {"action": "allow", "reason": "File inside sandbox.", "result": content}
+    except Exception as e:
+        return {"action": "allow", "reason": "File inside sandbox, but error reading.", "result": f"Error: {e}"}
 
 def fetch_url(args):
     url = args.get("url", "")
@@ -52,7 +66,10 @@ def fetch_url(args):
     if parsed.username or parsed.password:
         return {"action": "block", "reason": "URL contains userinfo.", "result": None}
     hostname = parsed.hostname
-    if not hostname or hostname not in ALLOWED_HOSTS:
+    if not hostname:
+        return {"action": "block", "reason": "No hostname in URL.", "result": None}
+    # Case-insensitive hostname check
+    if hostname.lower() not in ALLOWED_HOSTS:
         return {"action": "block", "reason": f"Host {hostname} not allowed.", "result": None}
 
     current_url = url
@@ -71,7 +88,7 @@ def fetch_url(args):
             new_parsed = urlparse(new_url)
             if new_parsed.username or new_parsed.password:
                 return {"action": "block", "reason": "Redirect contains userinfo.", "result": None}
-            if new_parsed.hostname not in ALLOWED_HOSTS:
+            if new_parsed.hostname and new_parsed.hostname.lower() not in ALLOWED_HOSTS:
                 return {"action": "block", "reason": f"Redirect to forbidden host: {new_parsed.hostname}", "result": None}
             current_url = new_url
         else:
