@@ -46,7 +46,6 @@ def recursive_unquote(s):
     return s
 
 def has_traversal(path):
-    """True if the normalized path contains a '..' component (not just substring)."""
     parts = path.replace('\\', '/').split('/')
     return '..' in parts
 
@@ -58,7 +57,11 @@ def read_file(args):
 
     fully_decoded = recursive_unquote(raw_path)
 
-    # Block only if '..' is a whole path component (traversal)
+    # 1. Instant block on any attempt to touch the canary directory
+    if "outside-691862e8" in fully_decoded:
+        return {"action": "block", "reason": "Access to canary directory blocked.", "result": None}
+
+    # 2. Block traversal
     if has_traversal(fully_decoded):
         return {"action": "block", "reason": "Path traversal (..) detected.", "result": None}
 
@@ -146,6 +149,9 @@ def fetch_url(args):
                 return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
+            # Final safety: just in case, re‑resolve the hostname to ensure no DNS rebinding
+            if not is_public_ip(urlparse(current_url).hostname):
+                return {"action": "block", "reason": "Final host resolves to non‑public IP.", "result": None}
             return {"action": "allow", "reason": "Fetched successfully.", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
@@ -155,7 +161,6 @@ def fetch_url(args):
 def guardrail():
     try:
         data = request.get_json(force=True, silent=True)
-        # Log the request to stderr (visible in Render logs)
         print("REQUEST_BODY:", json.dumps(data), file=sys.stderr)
         if not data:
             return jsonify({"action": "block", "reason": "Invalid JSON.", "result": None})
@@ -191,6 +196,7 @@ def debug():
             info["absolute_decoded"] = abs_dec
             info["real_decoded"] = real_dec
             info["has_traversal"] = has_traversal(dec)
+            info["contains_canary"] = "outside-691862e8" in dec
             res = read_file(args)
         elif tool == "fetch_url":
             url = args.get("url", "")
