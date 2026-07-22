@@ -47,7 +47,7 @@ def recursive_unquote(s):
 # ---------- read_file ----------
 def read_file(args):
     raw_path = args.get("path", "")
-    # Fully decode (handles %252e%252e%252f → %2e%2e%2f → ../)
+    # Fully decode (handles %252e%252e%252f → ../)
     fully_decoded = recursive_unquote(raw_path)
 
     # Make absolute relative to sandbox root (if not already absolute)
@@ -62,7 +62,7 @@ def read_file(args):
     except Exception as e:
         return {"action": "block", "reason": f"Path error: {e}", "result": None}
 
-    # Boundary check – must be INSIDE the sandbox (not even the root itself)
+    # Boundary check – must be INSIDE the sandbox (or the sandbox root itself)
     if real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep):
         pass   # inside
     else:
@@ -127,20 +127,20 @@ def fetch_url(args):
             try:
                 new_parsed = urlparse(new_url)
             except:
-                return {"action": "block", "reason": "Redirect URL malformed.", "result": None)
+                return {"action": "block", "reason": "Redirect URL malformed.", "result": None}
             # Scheme must remain http/https
             if new_parsed.scheme not in ("http", "https"):
-                return {"action": "block", "reason": f"Redirect to disallowed scheme {new_parsed.scheme}.", "result": None)
+                return {"action": "block", "reason": f"Redirect to disallowed scheme {new_parsed.scheme}.", "result": None}
             # No credentials in redirect
             if new_parsed.username or new_parsed.password:
-                return {"action": "block", "reason": "Redirect contains userinfo.", "result": None)
+                return {"action": "block", "reason": "Redirect contains userinfo.", "result": None}
             # Hostname must still be in allowlist (case‑insensitive)
             new_host = new_parsed.hostname
             if not new_host or new_host.lower() not in ALLOWED_HOSTS:
-                return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None)
+                return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None}
             # The new host must resolve to a public IP (prevents DNS rebinding)
             if not is_public_ip(new_host):
-                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None)
+                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
             # Not a redirect – success
