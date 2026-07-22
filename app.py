@@ -132,9 +132,13 @@ def fetch_url(args):
 
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
-        # ** Second DNS check right before the request (prevents TOCTOU / DNS rebinding) **
+        # Log the IPs we are about to connect to (for debugging)
+        try:
+            ips = {info[4][0] for info in socket.getaddrinfo(urlparse(current_url).hostname, None)}
+        except:
+            ips = set()
         if not is_public_ip(urlparse(current_url).hostname):
-            return {"action": "block", "reason": "Host suddenly resolved to a non‑public IP.", "result": None}
+            return {"action": "block", "reason": f"Host suddenly resolved to non‑public IPs: {ips}", "result": None}
 
         try:
             resp = requests.get(current_url, timeout=5, allow_redirects=False, stream=True)
@@ -158,13 +162,15 @@ def fetch_url(args):
             if not new_host or new_host.lower() not in ALLOWED_HOSTS:
                 return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None}
             if not is_public_ip(new_host):
-                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
+                return {"action": "block", "reason": f"Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
-            # Final check after response (belt and suspenders)
-            if not is_public_ip(urlparse(current_url).hostname):
-                return {"action": "block", "reason": "Final host resolved to a non‑public IP.", "result": None}
-            return {"action": "allow", "reason": "Fetched successfully.", "result": resp.text}
+            # Log final IPs (for debugging)
+            try:
+                final_ips = {info[4][0] for info in socket.getaddrinfo(urlparse(current_url).hostname, None)}
+            except:
+                final_ips = set()
+            return {"action": "allow", "reason": f"Fetched successfully (final IPs: {final_ips}).", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
 
