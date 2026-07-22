@@ -57,11 +57,9 @@ def read_file(args):
 
     fully_decoded = recursive_unquote(raw_path)
 
-    # 1. Instant block on any attempt to touch the canary directory
     if "outside-691862e8" in fully_decoded:
         return {"action": "block", "reason": "Access to canary directory blocked.", "result": None}
 
-    # 2. Block traversal
     if has_traversal(fully_decoded):
         return {"action": "block", "reason": "Path traversal (..) detected.", "result": None}
 
@@ -149,19 +147,22 @@ def fetch_url(args):
                 return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
-            # Final safety: just in case, re‑resolve the hostname to ensure no DNS rebinding
             if not is_public_ip(urlparse(current_url).hostname):
                 return {"action": "block", "reason": "Final host resolves to non‑public IP.", "result": None}
             return {"action": "allow", "reason": "Fetched successfully.", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
 
-# ---------- Main endpoint (with logging) ----------
+# ---------- Main endpoint (logs to file) ----------
+LOG_FILE = "/app/requests.log"
+
 @app.route("/", methods=["POST"])
 def guardrail():
     try:
         data = request.get_json(force=True, silent=True)
-        print("REQUEST_BODY:", json.dumps(data), file=sys.stderr)
+        # Log to file
+        with open(LOG_FILE, "a") as f:
+            f.write(f"REQUEST_BODY: {json.dumps(data)}\n")
         if not data:
             return jsonify({"action": "block", "reason": "Invalid JSON.", "result": None})
         tool = data.get("tool")
@@ -172,10 +173,20 @@ def guardrail():
             result = fetch_url(args)
         else:
             result = {"action": "block", "reason": "Unknown tool.", "result": None}
-        print("RESPONSE:", json.dumps(result), file=sys.stderr)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"RESPONSE: {json.dumps(result)}\n")
         return jsonify(result)
     except Exception as e:
         return jsonify({"action": "block", "reason": f"Internal error: {e}", "result": None})
+
+# ---------- Logs endpoint ----------
+@app.route("/logs", methods=["GET"])
+def logs():
+    try:
+        with open(LOG_FILE, "r") as f:
+            return f.read(), 200, {"Content-Type": "text/plain"}
+    except:
+        return "No logs yet.", 404
 
 # ---------- Debug endpoint ----------
 @app.route("/debug", methods=["POST"])
