@@ -1,4 +1,4 @@
-import json, os, socket, ipaddress, re
+import json, os, socket, ipaddress
 from urllib.parse import urljoin, urlparse, unquote
 import requests
 from flask import Flask, request, jsonify
@@ -11,7 +11,7 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
-    """True if host resolves ONLY to public IPs. Private/loopback/link-local → False."""
+    """True if host resolves ONLY to public IPs."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
@@ -24,55 +24,64 @@ def is_public_ip(host):
         return False
 
 def canonicalize_path(path):
-    """Resolve path completely: expanduser, realpath (symlinks)."""
-    # Reject null bytes
+    """Fully resolve a path, rejecting null bytes."""
     if '\0' in path:
         raise ValueError("null byte in path")
+    # Expand ~ and $HOME
     expanded = os.path.expanduser(path)
     if not os.path.isabs(expanded):
         abs_path = os.path.abspath(expanded)
     else:
         abs_path = expanded
+    # Resolve symlinks and ..
     return os.path.realpath(abs_path)
+
+def recursive_unquote(s):
+    """Decode percent-encoding repeatedly until the string stops changing."""
+    prev = None
+    while prev != s:
+        prev = s
+        s = unquote(s)
+    return s
 
 # ---------- read_file ----------
 def read_file(args):
     raw_path = args.get("path", "")
+    # Fully decode (handles %252e%252e%252f → %2e%2e%2f → ../)
+    fully_decoded = recursive_unquote(raw_path)
 
-    # 1. Decode once to catch percent‑encoded traversal
-    decoded_once = unquote(raw_path)
-
-    # 2. Build an absolute path from the decoded version (relative to sandbox)
-    if not os.path.isabs(decoded_once):
-        decoded_abs = os.path.join(SANDBOX_ROOT, decoded_once)
+    # Make absolute relative to sandbox root (if not already absolute)
+    if not os.path.isabs(fully_decoded):
+        decoded_abs = os.path.join(SANDBOX_ROOT, fully_decoded)
     else:
-        decoded_abs = decoded_once
+        decoded_abs = fully_decoded
 
-    # 3. Canonicalise (resolves .., symlinks, etc.)
+    # Resolve all .. and symlinks
     try:
         real_decoded = canonicalize_path(decoded_abs)
     except Exception as e:
         return {"action": "block", "reason": f"Path error: {e}", "result": None}
 
-    # 4. Boundary check on the fully resolved decoded path
-    if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
+    # Boundary check – must be INSIDE the sandbox (not even the root itself)
+    if real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep):
+        pass   # inside
+    else:
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
-    # 5. Now handle the raw path for actual file open (safe %‑encoded literal files)
+    # Now open the *raw* path (to support literal %2e%2e filenames)
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
         raw_abs = raw_path
+
     try:
         real_raw = canonicalize_path(raw_abs)
     except Exception as e:
         return {"action": "block", "reason": f"Raw path error: {e}", "result": None}
 
-    # (raw must also be inside sandbox – already guaranteed by the decoded check)
     if not (real_raw == SANDBOX_ROOT or real_raw.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Raw path escapes sandbox: {real_raw}", "result": None}
 
-    # 6. Actually read the file
     try:
         with open(real_raw, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -83,33 +92,25 @@ def read_file(args):
 # ---------- fetch_url ----------
 def fetch_url(args):
     url = args.get("url", "")
-    # Basic parse
+    # 1. Parse and validate scheme
     try:
         parsed = urlparse(url)
     except:
         return {"action": "block", "reason": "Malformed URL.", "result": None}
-
-    # Must be http or https
     if parsed.scheme not in ("http", "https"):
         return {"action": "block", "reason": f"Scheme {parsed.scheme} not allowed.", "result": None}
-
-    # No userinfo in URL
     if parsed.username or parsed.password:
         return {"action": "block", "reason": "URL contains userinfo.", "result": None}
 
     hostname = parsed.hostname
     if not hostname:
         return {"action": "block", "reason": "No hostname in URL.", "result": None}
-
-    # Allowed host (case‑insensitive)
     if hostname.lower() not in ALLOWED_HOSTS:
         return {"action": "block", "reason": f"Host {hostname} not allowed.", "result": None}
-
-    # The allowed host must resolve to a public IP (block DNS rebinding)
     if not is_public_ip(hostname):
         return {"action": "block", "reason": "Host resolves to non‑public IP.", "result": None}
 
-    # Follow redirects, re‑validating each hop
+    # 2. Follow redirects, re‑validating every hop
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
         try:
@@ -118,34 +119,36 @@ def fetch_url(args):
             return {"action": "block", "reason": f"Fetch error: {e}", "result": None}
 
         if resp.is_redirect:
-            new_url = resp.headers.get("Location")
+            new_url = resp.headers.get("Location", "")
             if not new_url:
                 return {"action": "block", "reason": "Redirect missing Location.", "result": None}
             new_url = urljoin(current_url, new_url)
+            # Re‑parse the redirect target
             try:
                 new_parsed = urlparse(new_url)
             except:
-                return {"action": "block", "reason": "Redirect URL malformed.", "result": None}
+                return {"action": "block", "reason": "Redirect URL malformed.", "result": None)
             # Scheme must remain http/https
             if new_parsed.scheme not in ("http", "https"):
-                return {"action": "block", "reason": f"Redirect to disallowed scheme {new_parsed.scheme}.", "result": None}
-            # No userinfo in redirect
+                return {"action": "block", "reason": f"Redirect to disallowed scheme {new_parsed.scheme}.", "result": None)
+            # No credentials in redirect
             if new_parsed.username or new_parsed.password:
-                return {"action": "block", "reason": "Redirect contains userinfo.", "result": None}
-            # Hostname must be in allowed set (case‑insensitive) and resolve to public IP
+                return {"action": "block", "reason": "Redirect contains userinfo.", "result": None)
+            # Hostname must still be in allowlist (case‑insensitive)
             new_host = new_parsed.hostname
             if not new_host or new_host.lower() not in ALLOWED_HOSTS:
-                return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None}
+                return {"action": "block", "reason": f"Redirect to forbidden host: {new_host}", "result": None)
+            # The new host must resolve to a public IP (prevents DNS rebinding)
             if not is_public_ip(new_host):
-                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
+                return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None)
             current_url = new_url
         else:
-            # Success – return content
+            # Not a redirect – success
             return {"action": "allow", "reason": "Fetched successfully.", "result": resp.text}
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
 
-# ---------- guardrail endpoint ----------
+# ---------- Main endpoint ----------
 @app.route("/", methods=["POST"])
 def guardrail():
     data = request.get_json(force=True, silent=True)
@@ -160,7 +163,7 @@ def guardrail():
     else:
         return jsonify({"action": "block", "reason": "Unknown tool.", "result": None})
 
-# ---------- /debug endpoint (safe to leave) ----------
+# ---------- Debug endpoint ----------
 @app.route("/debug", methods=["POST"])
 def debug():
     data = request.get_json(force=True, silent=True)
@@ -175,9 +178,9 @@ def debug():
         elif tool == "fetch_url":
             res = fetch_url(args)
         else:
-            res = {"action": "block", "reason": "Unknown tool.", "result": None}
+            res = {"action": "block", "reason": "Unknown tool."}
     except Exception as e:
-        res = {"action": "block", "reason": f"Exception: {e}", "result": None}
+        res = {"action": "block", "reason": f"Crash: {e}"}
     info["decision"] = res
     return jsonify(info)
 
