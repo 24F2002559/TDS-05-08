@@ -1,5 +1,5 @@
 import json, os, socket, ipaddress, sys, base64, re
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import urljoin, urlparse, unquote, parse_qs
 import requests
 from flask import Flask, request, jsonify
 
@@ -54,6 +54,33 @@ def recursive_unquote(s):
 def has_traversal(path):
     parts = path.replace('\\', '/').split('/')
     return '..' in parts
+
+# New helper: detect private IP in redirect parameters
+REDIRECT_PARAM_NAMES = {"next", "redirect", "url", "goto", "dest", "target", "return", "r", "to", "uri"}
+
+def has_redirect_param_with_private_ip(url):
+    """Return True if the URL contains a query parameter that is likely a redirect target and its value contains a private IP."""
+    parsed = urlparse(url)
+    query = parsed.query
+    if not query:
+        return False
+    try:
+        params = parse_qs(query)
+    except:
+        return False
+    for name, values in params.items():
+        # Check if the parameter name suggests a redirect
+        if name.lower() in REDIRECT_PARAM_NAMES:
+            for value in values:
+                # Decode the value (handle percent encoding)
+                decoded = recursive_unquote(value)
+                # Check for private IPv4 patterns
+                if re.search(r'\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3})\b', decoded):
+                    return True
+                # Check for IPv6 loopback/link-local/private prefixes
+                if re.search(r'\b(?:\[?(?:::1|fe80:|fc00:|fd00:|::ffff:|::))', decoded, re.IGNORECASE):
+                    return True
+    return False
 
 # ---------- read_file ----------
 def read_file(args):
@@ -116,6 +143,10 @@ def fetch_url(args):
     if not isinstance(url, str):
         return {"action": "block", "reason": "url must be a string.", "result": None}
 
+    # Block if the URL itself contains a redirect parameter with a private IP
+    if has_redirect_param_with_private_ip(url):
+        return {"action": "block", "reason": "URL contains redirect parameter targeting a private IP.", "result": None}
+
     try:
         parsed = urlparse(url)
     except:
@@ -151,6 +182,9 @@ def fetch_url(args):
             if not new_url:
                 return {"action": "block", "reason": "Redirect missing Location.", "result": None}
             new_url = urljoin(current_url, new_url)
+            # Also check the redirect target for redirect parameters with private IPs
+            if has_redirect_param_with_private_ip(new_url):
+                return {"action": "block", "reason": "Redirect target contains private IP in a redirect parameter.", "result": None}
             try:
                 new_parsed = urlparse(new_url)
             except:
@@ -193,7 +227,6 @@ def guardrail():
             result = read_file(args)
         elif tool == "fetch_url":
             result = fetch_url(args)
-            # write a one-line summary to the URL log for easy scanning
             with open(URL_LOG_FILE, "a") as uf:
                 uf.write(f"URL: {args.get('url','')}  ->  {result['action']}  ({result['reason']})\n")
         else:
