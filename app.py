@@ -11,12 +11,16 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
+    """True only if ALL resolved IPs are globally routable (no private/loopback/link-local/unspecified/IPv4-mapped)."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
         for ip_str in ips:
             ip = ipaddress.ip_address(ip_str)
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
+            # Handle IPv4-mapped IPv6
+            if ip.version == 6 and ip.ipv4_mapped:
+                ip = ip.ipv4_mapped      # extract embedded IPv4
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
                 return False
         return True
     except:
@@ -49,21 +53,30 @@ def read_file(args):
     if not isinstance(raw_path, str):
         return {"action": "block", "reason": "path must be a string.", "result": None}
 
+    # 1. Fully decode percent-encoding (any number of layers)
     fully_decoded = recursive_unquote(raw_path)
 
+    # 2. Instant block on any ".." after decoding – no traversal allowed
+    if '..' in fully_decoded:
+        return {"action": "block", "reason": "Path traversal (..) detected.", "result": None}
+
+    # 3. Make absolute relative to sandbox root
     if not os.path.isabs(fully_decoded):
         decoded_abs = os.path.join(SANDBOX_ROOT, fully_decoded)
     else:
         decoded_abs = fully_decoded
 
+    # 4. Canonicalise (resolves symlinks, extra slashes)
     try:
         real_decoded = canonicalize_path(decoded_abs)
     except Exception as e:
         return {"action": "block", "reason": f"Path error: {e}", "result": None}
 
+    # 5. Strict sandbox boundary check
     if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
+    # 6. Open the *raw* path (safe because we already confirmed the decoded version is inside)
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
@@ -94,8 +107,11 @@ def fetch_url(args):
         parsed = urlparse(url)
     except:
         return {"action": "block", "reason": "Malformed URL.", "result": None}
+
+    # Only http/https
     if parsed.scheme not in ("http", "https"):
         return {"action": "block", "reason": f"Scheme {parsed.scheme} not allowed.", "result": None}
+    # No userinfo
     if parsed.username or parsed.password:
         return {"action": "block", "reason": "URL contains userinfo.", "result": None}
 
@@ -107,6 +123,7 @@ def fetch_url(args):
     if not is_public_ip(hostname):
         return {"action": "block", "reason": "Host resolves to non‑public IP.", "result": None}
 
+    # Follow redirects, re‑validate every hop
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
         try:
@@ -122,7 +139,7 @@ def fetch_url(args):
             try:
                 new_parsed = urlparse(new_url)
             except:
-                return {"action": "block", "reason": "Redirect URL malformed.", "result": None}
+                return {"action": "block", "reason": "Redirect URL malformed.", "result": None)
             if new_parsed.scheme not in ("http", "https"):
                 return {"action": "block", "reason": f"Redirect to disallowed scheme {new_parsed.scheme}.", "result": None}
             if new_parsed.username or new_parsed.password:
@@ -157,7 +174,7 @@ def guardrail():
     except Exception as e:
         return jsonify({"action": "block", "reason": f"Internal error: {e}", "result": None})
 
-# ---------- Detailed debug endpoint ----------
+# ---------- Debug endpoint ----------
 @app.route("/debug", methods=["POST"])
 def debug():
     try:
@@ -167,7 +184,6 @@ def debug():
         tool = data.get("tool")
         args = data.get("arguments", {})
         info = {"tool": tool, "args": args}
-
         if tool == "read_file":
             raw = args.get("path", "")
             dec = recursive_unquote(raw)
@@ -176,7 +192,6 @@ def debug():
             info["decoded"] = dec
             info["absolute_decoded"] = abs_dec
             info["real_decoded"] = real_dec
-            info["sandbox_root"] = SANDBOX_ROOT
             res = read_file(args)
         elif tool == "fetch_url":
             url = args.get("url", "")
