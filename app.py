@@ -11,7 +11,6 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
-    """True if host resolves ONLY to public IPs."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
@@ -24,7 +23,6 @@ def is_public_ip(host):
         return False
 
 def canonicalize_path(path):
-    """Fully resolve a path, rejecting null bytes and non‑strings."""
     if not isinstance(path, str):
         raise ValueError("path must be a string")
     if '\0' in path:
@@ -37,7 +35,6 @@ def canonicalize_path(path):
     return os.path.realpath(abs_path)
 
 def recursive_unquote(s):
-    """Decode percent-encoding repeatedly until the string stops changing."""
     if not isinstance(s, str):
         return ""
     prev = None
@@ -48,31 +45,25 @@ def recursive_unquote(s):
 
 # ---------- read_file ----------
 def read_file(args):
-    # 1. Type check
     raw_path = args.get("path", "")
     if not isinstance(raw_path, str):
         return {"action": "block", "reason": "path must be a string.", "result": None}
 
-    # 2. Fully decode
     fully_decoded = recursive_unquote(raw_path)
 
-    # 3. Make absolute relative to sandbox root
     if not os.path.isabs(fully_decoded):
         decoded_abs = os.path.join(SANDBOX_ROOT, fully_decoded)
     else:
         decoded_abs = fully_decoded
 
-    # 4. Canonicalise (resolves .., symlinks, etc.)
     try:
         real_decoded = canonicalize_path(decoded_abs)
     except Exception as e:
         return {"action": "block", "reason": f"Path error: {e}", "result": None}
 
-    # 5. Boundary check on the fully resolved decoded path
     if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
-    # 6. Now handle the raw path (to support literal %2e%2e filenames)
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
@@ -86,7 +77,6 @@ def read_file(args):
     if not (real_raw == SANDBOX_ROOT or real_raw.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Raw path escapes sandbox: {real_raw}", "result": None}
 
-    # 7. Actual read
     try:
         with open(real_raw, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -100,11 +90,10 @@ def fetch_url(args):
     if not isinstance(url, str):
         return {"action": "block", "reason": "url must be a string.", "result": None}
 
-    # 1. Parse and validate scheme
     try:
         parsed = urlparse(url)
     except:
-        return {"action": "block", "reason": "Malformed URL.", "result": None}   # ← fixed line
+        return {"action": "block", "reason": "Malformed URL.", "result": None}
     if parsed.scheme not in ("http", "https"):
         return {"action": "block", "reason": f"Scheme {parsed.scheme} not allowed.", "result": None}
     if parsed.username or parsed.password:
@@ -118,7 +107,6 @@ def fetch_url(args):
     if not is_public_ip(hostname):
         return {"action": "block", "reason": "Host resolves to non‑public IP.", "result": None}
 
-    # 2. Follow redirects, re‑validating every hop
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
         try:
@@ -169,7 +157,7 @@ def guardrail():
     except Exception as e:
         return jsonify({"action": "block", "reason": f"Internal error: {e}", "result": None})
 
-# ---------- Debug endpoint ----------
+# ---------- Detailed debug endpoint ----------
 @app.route("/debug", methods=["POST"])
 def debug():
     try:
@@ -178,13 +166,28 @@ def debug():
             return jsonify({"error": "Invalid JSON"})
         tool = data.get("tool")
         args = data.get("arguments", {})
+        info = {"tool": tool, "args": args}
+
         if tool == "read_file":
+            raw = args.get("path", "")
+            dec = recursive_unquote(raw)
+            abs_dec = os.path.join(SANDBOX_ROOT, dec) if not os.path.isabs(dec) else dec
+            real_dec = canonicalize_path(abs_dec) if isinstance(raw, str) else None
+            info["decoded"] = dec
+            info["absolute_decoded"] = abs_dec
+            info["real_decoded"] = real_dec
+            info["sandbox_root"] = SANDBOX_ROOT
             res = read_file(args)
         elif tool == "fetch_url":
+            url = args.get("url", "")
+            parsed = urlparse(url) if isinstance(url, str) else None
+            info["parsed"] = str(parsed) if parsed else None
+            info["hostname"] = parsed.hostname if parsed else None
             res = fetch_url(args)
         else:
             res = {"action": "block", "reason": "Unknown tool."}
-        return jsonify({"tool": tool, "args": args, "decision": res})
+        info["decision"] = res
+        return jsonify(info)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
