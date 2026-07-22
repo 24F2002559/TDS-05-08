@@ -31,6 +31,10 @@ def canonicalize_path(path):
 
 def read_file(args):
     path = args.get("path", "")
+    # If path is not absolute, make it relative to the sandbox root
+    if not os.path.isabs(path):
+        path = os.path.join(SANDBOX_ROOT, path)
+    # Canonicalize (resolves '..', symlinks, etc.)
     real = canonicalize_path(path)
     if real == SANDBOX_ROOT or real.startswith(SANDBOX_ROOT + os.sep):
         try:
