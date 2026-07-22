@@ -1,4 +1,4 @@
-import json, os, socket, ipaddress
+import json, os, socket, ipaddress, sys
 from urllib.parse import urljoin, urlparse, unquote
 import requests
 from flask import Flask, request, jsonify
@@ -11,7 +11,6 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
-    """True only if ALL resolved IPs are globally routable (no private/loopback/link-local/unspecified/IPv4-mapped)."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
@@ -48,7 +47,6 @@ def recursive_unquote(s):
 
 def has_traversal(path):
     """True if the normalized path contains a '..' component (not just substring)."""
-    # Normalize slashes and split
     parts = path.replace('\\', '/').split('/')
     return '..' in parts
 
@@ -152,11 +150,13 @@ def fetch_url(args):
 
     return {"action": "block", "reason": "Too many redirects.", "result": None}
 
-# ---------- Main endpoint ----------
+# ---------- Main endpoint (with logging) ----------
 @app.route("/", methods=["POST"])
 def guardrail():
     try:
         data = request.get_json(force=True, silent=True)
+        # Log the request to stderr (visible in Render logs)
+        print("REQUEST_BODY:", json.dumps(data), file=sys.stderr)
         if not data:
             return jsonify({"action": "block", "reason": "Invalid JSON.", "result": None})
         tool = data.get("tool")
@@ -167,6 +167,7 @@ def guardrail():
             result = fetch_url(args)
         else:
             result = {"action": "block", "reason": "Unknown tool.", "result": None}
+        print("RESPONSE:", json.dumps(result), file=sys.stderr)
         return jsonify(result)
     except Exception as e:
         return jsonify({"action": "block", "reason": f"Internal error: {e}", "result": None})
