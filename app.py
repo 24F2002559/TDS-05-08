@@ -18,7 +18,7 @@ def is_public_ip(host):
         for ip_str in ips:
             ip = ipaddress.ip_address(ip_str)
             if ip.version == 6 and ip.ipv4_mapped:
-                ip = ip.ipv4_mapped      # extract embedded IPv4
+                ip = ip.ipv4_mapped
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
                 return False
         return True
@@ -46,6 +46,12 @@ def recursive_unquote(s):
         s = unquote(s)
     return s
 
+def has_traversal(path):
+    """True if the normalized path contains a '..' component (not just substring)."""
+    # Normalize slashes and split
+    parts = path.replace('\\', '/').split('/')
+    return '..' in parts
+
 # ---------- read_file ----------
 def read_file(args):
     raw_path = args.get("path", "")
@@ -54,8 +60,8 @@ def read_file(args):
 
     fully_decoded = recursive_unquote(raw_path)
 
-    # Block any ".." after full decoding – no traversal allowed
-    if '..' in fully_decoded:
+    # Block only if '..' is a whole path component (traversal)
+    if has_traversal(fully_decoded):
         return {"action": "block", "reason": "Path traversal (..) detected.", "result": None}
 
     if not os.path.isabs(fully_decoded):
@@ -183,6 +189,7 @@ def debug():
             info["decoded"] = dec
             info["absolute_decoded"] = abs_dec
             info["real_decoded"] = real_dec
+            info["has_traversal"] = has_traversal(dec)
             res = read_file(args)
         elif tool == "fetch_url":
             url = args.get("url", "")
