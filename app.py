@@ -104,7 +104,7 @@ def fetch_url(args):
     try:
         parsed = urlparse(url)
     except:
-        return {"action": "block", "reason": "Malformed URL.", "result": None)
+        return {"action": "block", "reason": "Malformed URL.", "result": None}   # ← fixed line
     if parsed.scheme not in ("http", "https"):
         return {"action": "block", "reason": f"Scheme {parsed.scheme} not allowed.", "result": None}
     if parsed.username or parsed.password:
