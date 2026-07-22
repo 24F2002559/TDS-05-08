@@ -11,7 +11,6 @@ REDIRECT_LIMIT = 5
 
 # ---------- helpers ----------
 def is_public_ip(host):
-    """True if host resolves ONLY to public IPs. False if any private/loopback/link-local."""
     try:
         addrinfo = socket.getaddrinfo(host, None)
         ips = {info[4][0] for info in addrinfo}
@@ -26,7 +25,6 @@ def is_public_ip(host):
         return False
 
 def get_all_ips(host):
-    """Return a set of IP strings for the given host, for logging."""
     try:
         return {info[4][0] for info in socket.getaddrinfo(host, None)}
     except:
@@ -63,7 +61,6 @@ def read_file(args):
     if not isinstance(raw_path, str):
         return {"action": "block", "reason": "path must be a string.", "result": None}
 
-    # Handle base64-encoded paths
     decoded_path = raw_path
     if raw_path.startswith("base64:"):
         try:
@@ -93,7 +90,6 @@ def read_file(args):
     if not (real_decoded == SANDBOX_ROOT or real_decoded.startswith(SANDBOX_ROOT + os.sep)):
         return {"action": "block", "reason": f"Path resolves outside sandbox: {real_decoded}", "result": None}
 
-    # Open the raw path (to support literal %2e%2e filenames)
     if not os.path.isabs(raw_path):
         raw_abs = os.path.join(SANDBOX_ROOT, raw_path)
     else:
@@ -141,7 +137,6 @@ def fetch_url(args):
     current_url = url
     for _ in range(REDIRECT_LIMIT + 1):
         current_host = urlparse(current_url).hostname
-        # Final pre‑request DNS check (prevents DNS rebinding)
         if not is_public_ip(current_host):
             ips = get_all_ips(current_host)
             return {"action": "block", "reason": f"Host {current_host} suddenly resolves to non‑public IPs: {ips}", "result": None}
@@ -171,12 +166,10 @@ def fetch_url(args):
                 return {"action": "block", "reason": "Redirect host resolves to non‑public IP.", "result": None}
             current_url = new_url
         else:
-            # After receiving the response, check again that the final host is still public
             final_host = urlparse(current_url).hostname
             if not is_public_ip(final_host):
                 final_ips = get_all_ips(final_host)
                 return {"action": "block", "reason": f"Final host {final_host} resolves to non‑public IPs: {final_ips}", "result": None}
-            # All good – allow
             final_ips = get_all_ips(final_host)
             return {"action": "allow", "reason": f"Fetched successfully (final IPs: {final_ips}).", "result": resp.text}
 
@@ -184,6 +177,7 @@ def fetch_url(args):
 
 # ---------- Main endpoint ----------
 LOG_FILE = "/app/requests.log"
+URL_LOG_FILE = "/app/url_checks.log"
 
 @app.route("/", methods=["POST"])
 def guardrail():
@@ -199,6 +193,9 @@ def guardrail():
             result = read_file(args)
         elif tool == "fetch_url":
             result = fetch_url(args)
+            # write a one-line summary to the URL log for easy scanning
+            with open(URL_LOG_FILE, "a") as uf:
+                uf.write(f"URL: {args.get('url','')}  ->  {result['action']}  ({result['reason']})\n")
         else:
             result = {"action": "block", "reason": "Unknown tool.", "result": None}
         with open(LOG_FILE, "a") as f:
@@ -207,7 +204,7 @@ def guardrail():
     except Exception as e:
         return jsonify({"action": "block", "reason": f"Internal error: {e}", "result": None})
 
-# ---------- Logs endpoint ----------
+# ---------- Logs endpoints ----------
 @app.route("/logs", methods=["GET"])
 def logs():
     try:
@@ -215,6 +212,14 @@ def logs():
             return f.read(), 200, {"Content-Type": "text/plain"}
     except:
         return "No logs yet.", 404
+
+@app.route("/urllog", methods=["GET"])
+def urllog():
+    try:
+        with open(URL_LOG_FILE, "r") as f:
+            return f.read(), 200, {"Content-Type": "text/plain"}
+    except:
+        return "No URL checks yet.", 404
 
 # ---------- Debug endpoint ----------
 @app.route("/debug", methods=["POST"])
